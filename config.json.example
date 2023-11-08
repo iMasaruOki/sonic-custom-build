@@ -1,0 +1,16 @@
+{
+    "repository": "https://github.com/sonic-net/sonic-buildimage",
+    "local-repository": "https://github.com/iMasaruOki",
+    "remote-name": "mine",
+    "local-changes": {
+        "sonic-buildimage": [
+            "copp-vrrp",
+            "keepalived"
+        ],
+        "sonic-buildimage/src/sonic-swss": [
+            "vlan-sub-intf",
+            "vxlan-ttl",
+            "nlmsg_newaddr"
+        ]
+    }
+}

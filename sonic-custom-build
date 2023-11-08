@@ -1,0 +1,524 @@
+#!/bin/sh
+
+#
+# default parameters
+#
+STAGES=""
+USERNAME=admin
+PASSWORD=YourPaSsWoRd
+BRANCHES=master,202305
+PLATFORMS=broadcom,vs
+TOP=$PWD
+WORKDIR=$TOP
+OUTDIR=$TOP/output
+JSONFILE=$TOP/config.json
+RELPREFIX=release
+
+#
+# functions
+#
+print() {
+    if [ "x$VERBOSE" = "xyes" ]; then
+       echo "$@"
+    fi
+}
+
+execute() {
+    if [ "x$VERBOSE" = "xyes" -o "x$NOEXEC" = "xyes" ]; then
+       echo "$@"
+    fi
+    if [ "x$NOEXEC" != "xyes" ]; then
+	eval "$@" || do_result $? "$@"
+    fi
+}
+
+get_target() {
+    case $PLATFORM in
+	vs)
+	    TARGET=target/sonic-vs.img.gz
+	    EXTRA_TARGET=target/sonic-vs.bin
+	    ;;
+	p4)
+	    TARGET=target/docker-sonic-p4.gz
+	    EXTRA_TARGET=
+	    ;;
+	*)
+	    TARGET=target/sonic-$PLATFORM.bin
+	    EXTRA_TARGET=
+	    ;;
+    esac
+}
+
+get_new_tag() {
+    for num in $(seq 0 9); do
+	TAG=$RELPREFIX-$BRANCH-$(date +%Y%m%d)-$num
+	if [ ! -d $OUTDIR/$TAG ]; then
+	    return
+	fi
+    done
+    echo "Too many tagged in today!"
+    exit 1
+}
+
+get_latest_tag() {
+    for num in $(seq 0 9); do
+	TAG=$RELPREFIX-$BRANCH-$(date +%Y%m%d)-$num
+	if [ ! -d $OUTDIR/$TAG ]; then
+	    break
+	fi
+    done
+    if [ $num != 0 ]; then
+	TAG=$RELPREFIX-$BRANCH-$(date +%Y%m%d)-$(($num - 1))
+    fi
+}
+
+do_prerequisites() {
+    REQUIED=""
+    EXECUTABLES="j2 docker git make jq"
+    if echo $STAGES | grep release > /dev/null 2>&1; then
+	EXECUTABLES="$EXECUTABLES gh"
+    fi
+    for e in $EXECUTABLES; do
+	which $e > /dev/null 2>&1
+	if [ $? != 0 ]; then
+	    echo "REQUIED: $e is not found."
+	    REQUIED="$REQUIED $e"
+	fi
+    done
+    if [ "x$REQUIED" != "x" ]; then
+	exit 1
+    fi
+}
+
+do_read_json() {
+    if [ -f "$JSONFILE" ]; then
+	export JSON="$(cat $JSONFILE)"
+	export REPO="$(echo $JSON|jq -r '."repository"')"
+	export PULLREQUESTS="$(echo $JSON|jq '."pull-requests"')"
+	export CHERRYPICKS="$(echo $JSON|jq '."cherry-picks"')"
+	export CHANGES="$(echo $JSON|jq '."local-changes"')"
+	export REMOTE="$(echo $JSON|jq -r '."remote-name"')"
+	export LOCALREPO="$(echo $JSON|jq -r '."local-repository"')"
+	export https_proxy="$(echo $JSON|jq -r '."https-proxy"')"
+	if [ "x$REPO" = "x" ]; then
+	    echo "repository is not specified in $JSONFILE."
+	    exit 1
+	fi
+    else
+	export REPO=https://github.com/sonic-net/sonic-buildimage
+    fi
+}
+
+do_clone() {
+    execute sudo rm -rf $WORKDIR/$(basename $REPO)
+    cd $WORKDIR
+    execute git clone $REPO
+    cd -
+}
+
+do_prepare_repository() {
+    # Fetch submodules
+    cd $WORKDIR/$(basename $REPO)
+    execute git checkout $BRANCH
+    execute make init
+    # add remote repositories and fetch it
+    if [ "x$REMOTE" != "x" ]; then
+	for dir in $(echo $CHANGES|jq -r 'keys|@tsv'); do
+	    cd $WORKDIR/$dir
+	    execute git remote add $REMOTE $LOCALREPO/$(basename $dir)
+	    execute git fetch $REMOTE
+	    cd -
+	done
+    fi
+}
+
+do_init() {
+    cd $WORKDIR/$(basename $REPO)
+    execute git checkout -f $BRANCH
+    execute make init
+    cd -
+}
+
+do_merge_pr() {
+    # merge pull requests
+    if [ "x$PULLREQUEST" != "x" ]; then
+	for dir in $(echo $PULLREQUESTS|jq -r 'keys|@tsv'); do
+	    execute cd $WORKDIR/$dir
+	    for pr in $(echo $PULLREQUESTS|jq -r ".\"$dir\" | @tsv"); do
+		execute gh repo set-default $(basename $(dirname $REPO))/$dir
+		execute gh pr checkout -b pull/$pr $pr
+		execute git checkout $BRANCH
+		execute git rebase pull/$pr
+	    done
+	    execute cd -
+	done
+    fi
+}
+
+do_cherry_pick() {
+    if [ "x$CHERRYPICKS" != "x" ]; then
+	for dir in $(echo $CHERRYPICKS|jq -r 'keys|@tsv'); do
+	    execute cd $WORKDIR/$dir
+	    for commit in $(echo $CHERRYPICKS|jq -r ".\"$dir\" | @tsv"); do
+		execute git cherry-pick $commit
+	    done
+	    execute cd -
+	done
+    fi
+}
+
+do_merge() {
+    # merge topic branches
+    if [ "x$CHANGES" != "x" ]; then
+	for dir in $(echo $CHANGES|jq -r 'keys|@tsv'); do
+	    execute cd $WORKDIR/$dir
+	    for branch in $(echo $CHANGES|jq -r ".\"$dir\" | @tsv"); do
+		execute git rebase $REMOTE/$branch
+	    done
+	    execute cd -
+	done
+    fi
+}
+
+do_configure() {
+    cd $WORKDIR/$(basename $REPO)
+    execute make configure PLATFORM=$PLATFORM
+    cd -
+}
+
+do_clean() {
+    cd $WORKDIR/$(basename $REPO)
+    execute make clean
+    # workaround
+    execute rm -f src/sonic-sairedis/config.status
+    execute rm -f src/sonic-sairedis/config.h
+    execute rm -f src/sonic-sairedis/Makefile
+    execute rm -f src/sonic-sairedis/libtool
+    execute rm -f src/sonic-sairedis/pyext/py2/*.o
+    execute rm -f src/sonic-sairedis/pyext/py2/*.lo
+    execute rm -f src/sonic-sairedis/pyext/py3/*.o
+    execute rm -f src/sonic-sairedis/pyext/py3/*.lo
+    execute rm -f src/sonic-sairedis/*/*.so
+    execute rm -f src/sonic-sairedis/*/*.o
+    execute rm -f src/sonic-sairedis/*/*.a
+    execute rm -f src/sonic-sairedis/*/*.la
+    execute rm -f src/sonic-sairedis/*/*.lo
+    execute rm -rf src/sonic-sairedis/meta/.libs
+    execute rm -f src/sonic-sairedis/unittest/*/*.o
+    cd -
+}
+
+do_build() {
+    LAPSTART=$(date +%s)
+    cd $WORKDIR/$(basename $REPO)
+    execute make USERNAME=$USERNAME PASSWORD=$PASSWORD $BUILDOPTS $TARGET
+    execute mkdir -p $OUTDIR/$TAG
+    execute cp -p $TARGET $OUTDIR/$TAG/
+    if [ x$EXTRA_TARGET != x ]; then
+	execute cp -p $EXTRA_TARGET $OUTDIR/$TAG/
+    fi
+    cd -
+    LAPEND=$(date +%s)
+    execute echo "BUILDTIME: $(date +%X --date=@$(($LAPEND - $LAPSTART)))"
+}
+
+do_tag() {
+    cd $WORKDIR/$(basename $REPO)
+    execute git tag $TAG
+    cd -
+}
+
+do_release() {
+    cd $WORKDIR/$(basename $REPO)
+    execute gh release create --generate-notes -R $LOCALREPO/$(basename $REPO) $TAG $OUTDIR/$TAG/*
+    cd -
+}
+
+do_record() {
+    STARTDATE=$(date)
+    STARTTIME=$(date +%s)
+}
+
+do_summary() {
+    RED='\033[1;31m'
+    PURPLE='\033[1;35m'
+    CYAN='\033[1;36m'
+    YELLOW='\033[1;33m'
+    GREEN='\033[1;32m'
+    GRAY='\033[0m'
+    OKFORM="|${GREEN}%10.10s${GRAY}"
+    PARTOKFORM="|${YELLOW}%10.10s${GRAY}"
+    NGFORM="|${RED}%10.10s${GRAY}"
+
+    BANNER=$(printf " %10.10s" PLATFORM $(echo $BRANCHES|sed 's/ *, */ /g'))
+    echo "tag: $TAG"
+    echo "$BANNER"
+    echo "$BANNER" | sed 's/./-/g'
+    for PLATFORM in $(echo $PLATFORMS|sed 's/,/ /g'); do
+	echo $(printenv $PLATFORM) | grep ng > /dev/null 2>&1
+	if [ $? = 0 ]; then
+	    echo $(printenv $PLATFORM) | grep ok > /dev/null 2>&1
+	    if [ $? = 0 ]; then
+		FORMAT=$PARTOKFORM
+	    else
+		FORMAT=$NGFORM
+	    fi
+	else
+	    FORMAT=$OKFORM
+	fi
+	printf $FORMAT $PLATFORM
+	for RESULT in $(printenv $PLATFORM); do
+	    if [ $RESULT = ok ]; then
+		FORMAT=$OKFORM
+	    else
+		FORMAT=$NGFORM
+	    fi
+	    printf $FORMAT $RESULT
+	done
+	echo
+    done
+}
+
+do_result() {
+    EXITCODE=$1
+    shift
+    if [ $EXITCODE != 0 -a "x$1" != "x" ]; then
+        echo "Error: $@"
+    fi
+    if [ "x$STARTDATE" != x ]; then
+        ENDDATE=$(date)
+        ENDTIME=$(date +%s)
+
+        echo START: $STARTDATE
+        echo END  : $ENDDATE
+        echo time: $(date +%X --date=@$(($ENDTIME - $STARTTIME)))
+    fi
+    do_summary
+    exit $EXITCODE
+}
+
+usage() {
+cat <<EOF
+Usage: $0 [option] stage [ stage ... ]
+  stage                      Specify build stage.
+                               stages are:
+                                 prepare
+                                 clone
+                                 init
+                                 merge_pr
+                                 merge
+				 configure
+				 clean
+                                 build
+                                 release
+                               "all" allows all stages.
+                               "build-all" allows all stages except for release.
+  option:
+    -b | --branch BRANCH       Specify branch.
+                               default: $BRANCHES
+
+    -t | --tag TAGNAME         git tag at build successful.
+                               default tag: release-\$BRANCH-%Y%m%d-\$num
+
+    -d | --debug               Enable debug build.
+
+    -n | --no-execute          Do not execute.
+
+    -o | --outdir              Speficy output directory.
+                               default: $OUTDIR
+
+    -p | --platform PLATFORM   Speficy platform.
+                               Comma separated value allows multiple platform.
+                               default: $PLATFORMS
+
+    -j | --jobs NUM            Specify parallel build jobs.
+                               default: 1
+
+    -J | --json FILE           Specify JSON configuration.
+                               default: $JSONFILE
+
+    -U | --user USERNAME       Specify user.
+                               default: $USERNAME
+
+    -P | --password PASSWORD   Specify password.
+                               default: $PASSWORD
+
+    -v | --verbose             verbose message.
+
+    -w | --workdir DIR         Speficy working directory.
+                               default: $WORKDIR
+
+    -h | --help                Display this message.
+EOF
+do_result 1
+}
+
+#
+# main
+#
+
+while test $# -ge 1; do
+    case "$1" in
+	-b|--branch)
+	    shift
+	    BRANCHES=$1
+	    ;;
+
+	-n|--no-execute)
+	    NOEXEC=yes
+	    ;;
+
+	-p|--platform)
+	    shift
+	    PLATFORMS=$1
+	    ;;
+
+	-J|--json)
+	    shift
+	    JSONFILE=$1
+	    ;;
+
+	-j|--jobs)
+	    shift
+	    BUILDOPTS="$BUILDOPTS SONIC_BUILD_JOBS=$1"
+	    ;;
+
+	-d|--debug)
+	    BUILDOPTS="$BUILDOPTS INSTALL_DEBUG_TOOLS=y SONIC_DEBUGGING_ON=y"
+	    RELPREFIX=debug
+	    ;;
+
+	-U|--user)
+	    shift
+	    USERNAME=$1
+	    ;;
+
+	-P|--password)
+	    shift
+	    PASSWORD=$1
+	    ;;
+
+	-t|--tag)
+	    shift
+	    TAG=$1
+	    ;;
+
+	-v|--verbose)
+	    VERBOSE=yes
+	    ;;
+
+	-w|--workdir)
+	    shift
+	    WORKDIR=$1
+	    ;;
+
+	-o|--outdir)
+	    shift
+	    OUTDIR=$1
+	    ;;
+
+	clone|prepare|init|merge_pr|merge|configure|clean|build|release)
+	    STAGES="$STAGES $1"
+	    ;;
+
+	all)
+	    STAGES="prepare clone merge_pr cherry_pick merge configure build clean release"
+	    ;;
+
+	build-all)
+	    STAGES="clone prepare merge_pr cherry_pick merge configure clean build"
+	    ;;
+
+	-h|--help)
+	    usage
+	    ;;
+	*)
+	    echo "Error: $1: invalid parameter."
+	    usage
+	    ;;
+    esac
+    shift
+done
+
+if [ "x$STAGES" = "x" ]; then
+    echo "Error: Stage is not specified."
+    usage
+fi
+
+#
+#
+#
+
+do_prerequisites
+do_read_json
+do_record
+
+print "BRANCHES $BRANCHES"
+print "PLATFORMS $PLATFORMS"
+
+for BRANCH in $(echo $BRANCHES|sed 's/,/ /g'); do
+  if [ x$TAG = x ]; then
+    get_new_tag
+  fi
+  RELEASE=
+  for STAGE in $STAGES; do
+    case $STAGE in
+        clone)
+            do_clone
+            ;;
+	prepare)
+	    do_prepare_repository
+	    ;;
+	init)
+	    do_init
+	    ;;
+	merge_pr)
+	    do_merge_pr
+	    ;;
+	merge)
+	    do_merge
+	    ;;
+	cherry_pick)
+	    do_cherry_pick
+	    ;;
+        configure|clean|build|release)
+            ;;
+        *)
+            echo "Unknown stage \"$STAGE\" is specified."
+            usage
+            ;;
+    esac
+  done
+  for PLATFORM in $(echo $PLATFORMS|sed 's/,/ /g'); do
+    get_target
+    for STAGE in $STAGES; do
+	case $STAGE in
+	    configure)
+		do_configure
+		;;
+	    clean)
+		do_clean
+		;;
+	    build)
+		BUILT=yes
+		do_build
+		;;
+	    release)
+		RELEASE=yes
+		;;
+	esac
+    done
+    export $PLATFORM="$(printenv $PLATFORM) ok"
+  done
+  if [ x$BUILT != x ]; then
+      do_tag
+  elif [ x$TAG = x ]; then
+      get_latest_tag
+  fi
+  if [ x$RELEASE != x ]; then
+      do_release
+  fi
+done
+
+echo "Complete."
+do_result 0
