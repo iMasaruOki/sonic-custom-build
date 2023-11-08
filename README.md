@@ -12,6 +12,15 @@ sonic-custom-build is shell script for build SONiC image with local changes.
 - `gh` for release built images.
 
 
+## Environment
+
+Tested on Ubuntu 22.04LTS.
+
+```
+# tested command line:
+env NOBUSTER=yes ./sonic-custom-build -p vs build-all
+```
+
 ## Basic usage
 
 Basic build target are `build-all`.
