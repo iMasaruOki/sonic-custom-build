@@ -100,6 +100,9 @@ do_read_json() {
 	export REMOTE="$(echo $JSON|jq -r '."remote-name"')"
 	export LOCALREPO="$(echo $JSON|jq -r '."local-repository"')"
 	export https_proxy="$(echo $JSON|jq -r '."https-proxy"')"
+	if [ $https_proxy = null ]; then
+	    unset https_proxy
+	fi
 	if [ "x$REPO" = "x" ]; then
 	    echo "repository is not specified in $JSONFILE."
 	    exit 1
