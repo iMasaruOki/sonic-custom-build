@@ -305,8 +305,8 @@ cat <<EOF
 Usage: $0 [option] stage [ stage ... ]
   stage                      Specify build stage.
                                stages are:
-                                 prepare
                                  clone
+                                 prepare
                                  init
                                  merge_pr
                                  merge
@@ -425,7 +425,7 @@ while test $# -ge 1; do
 	    ;;
 
 	all)
-	    STAGES="prepare clone merge_pr cherry_pick merge configure build clean release"
+	    STAGES="clone prepare merge_pr cherry_pick merge configure build clean release"
 	    ;;
 
 	build-all)
