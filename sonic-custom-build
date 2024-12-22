@@ -294,7 +294,7 @@ do_result() {
 
         echo START: $STARTDATE
         echo END  : $ENDDATE
-        echo time: $(date +%X --date=@$(($ENDTIME - $STARTTIME)))
+        echo time: $(env TZ=UTC date +%X --date=@$(($ENDTIME - $STARTTIME)))
     fi
     do_summary
     exit $EXITCODE
